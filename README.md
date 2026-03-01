@@ -1,6 +1,6 @@
 # Remittance Project
 
-A simple money-transfer system with two services: an **Orchestrator** (handles transfers end-to-end) and a **Payout Partner** (simulates sending money).
+A simple money-transfer system with two services: an **Orchestrator** (handles transfers) and a **Payout Partner** (simulates sending money).
 
 ---
 
