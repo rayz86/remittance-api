@@ -1,0 +1,29 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  orchestrator:
+    build: ./orchestrator
+    ports:
+      - "3000:3000"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/transfers
+      - WEBHOOK_SECRET=key_123
+      - PAYOUT_URL=http://payout:4000
+    depends_on:
+      - mongo
+
+  payout:
+    build: ./payout
+    ports:
+      - "4000:4000"
+    environment:
+      - WEBHOOK_SECRET=key_123
+      - ORCHESTRATOR_URL=http://orchestrator:3000/webhooks/payout-status
+
+volumes:
+  mongo-data:

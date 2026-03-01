@@ -1,8 +1,8 @@
+require('./db');
+require('dotenv').config();
 const express = require('express');
 
-const {randomUUID} = require ('crypto');
-const { create } = require('domain');
-const transfers= [];
+const Transfer = require('./models/Transfer');
 
 const STATES={
     CREATED: "CREATED",
@@ -17,16 +17,19 @@ const STATES={
 };
 
 const allowedTransitions = {
-    CREATED: ["QUOTED"],
-    QUOTED: ["CONFIRMED"],
-    CONFIRMED: ["COMPLIANCE_PENDING", "COMPLIANCE_APPROVED", "COMPLIANCE_REJECTED"],
-    COMPLIANCE_PENDING: ["COMPLIANCE_APPROVED", "COMPLIANCE_REJECTED"],
-    COMPLIANCE_APPROVED: ["PAYMENT_PENDING"],
+    CREATED: [STATES.QUOTED],
+    QUOTED: [STATES.CONFIRMED],
+    CONFIRMED: [STATES.COMPLIANCE_PENDING, STATES.COMPLIANCE_APPROVED, STATES.COMPLIANCE_REJECTED],
+    COMPLIANCE_PENDING: [STATES.COMPLIANCE_APPROVED, STATES.COMPLIANCE_REJECTED],
+    COMPLIANCE_APPROVED: [STATES.PAYMENT_PENDING],
     COMPLIANCE_REJECTED: [],
-    PAYMENT_PENDING: ["PAID", "FAILED"],
+    PAYMENT_PENDING: [STATES.PAID, STATES.FAILED],
     PAID: [],
     FAILED: []
 };
+
+const crypto = require('crypto'); //for HMAC
+const axios = require('axios'); //for making HTTP requests
 
 function changeState(transfer, newState){
     const allowed = allowedTransitions[transfer.state];
@@ -81,36 +84,68 @@ function complianceCheck(transfer){
 }
 
 const app = express();
+
+//webhook endpoint to receive payout status
+app.post("/webhooks/payout-status", express.raw({ type: 'application/json' }), async (req, res) => {
+    const rawBody = req.body;
+
+    const expectedSignature = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET)
+        .update(rawBody)
+        .digest('hex');
+
+    if (req.headers['x-webhook-signature'] !== expectedSignature) {
+        return res.status(401).send("Invalid signature");
+    }
+
+    const { partnerPayoutId, status } = JSON.parse(rawBody);
+    console.log(`Webhook received: partnerPayoutId=${partnerPayoutId}, status=${status}`);
+
+    const transfer = await Transfer.findOne({ partnerPayoutId });
+
+    if (!transfer) {
+        return res.send("Transfer not found");
+    }
+
+    if (transfer.state === STATES.PAID || transfer.state === STATES.FAILED) {
+        return res.send("Already processed beyond payment state");
+    }
+
+    try {
+    changeState(
+        transfer,
+        status === "PAID" ? STATES.PAID : STATES.FAILED
+    );
+    await transfer.save();
+    console.log(`Transfer ${transfer._id} updated to ${transfer.state}`);
+    res.send("OK");
+    } catch (e) {
+        res.status(400).send(e.message);
+    }
+});
+
 app.use(express.json());
 
 app.get('/', (req, res) => {
     res.send('Server running');
 });
 
-app.post('/hello', (req, res) => {
-    res.json({
-        message: "Hello from backend"
-    })
-})
-
-app.post('/transfers', (req, res) => {
+//to initiate a transfer
+app.post('/transfers', async (req, res) => {
     const { sender, recipient, amount, currency } = req.body;
-    const transfer = {
-        id: randomUUID(),
+    const transfer = await Transfer.create({
         sender,
         recipient,
         amount,
         currency,
-        state: "CREATED",
-        create: new Date()
-    };
-    transfers.push(transfer);
+        state: STATES.CREATED,
+    });
     res.status(201).json(transfer);
 });
 
-app.get('/transfers/:id', (req, res) => {
+//to get transfer details
+app.get('/transfers/:id', async (req, res) => {
     const {id} = req.params;
-    const transfer = transfers.find(t => t.id === id);
+    const transfer = await Transfer.findById(id);
 
     if (!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -118,8 +153,9 @@ app.get('/transfers/:id', (req, res) => {
     res.json(transfer);
 });
 
-app.post("/transfers/:id/quote", (req, res) => {
-    const transfer = transfers.find(t => t.id === req.params.id);
+//to get a quote for a transfer
+app.post("/transfers/:id/quote", async (req, res) => {
+    const transfer = await Transfer.findById(req.params.id);
 
     if (!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -130,14 +166,16 @@ app.post("/transfers/:id/quote", (req, res) => {
 
         transfer.quote = quote;
         changeState(transfer, STATES.QUOTED);
+        await transfer.save();
         res.json(transfer);
     } catch (error) {
         res.status(400).json({message: error.message});
     }
 });
 
-app.post("/transfers/:id/confirm", (req, res) => {
-    const transfer = transfers.find(t => t.id === req.params.id);
+//to confirm a transfer and trigger compliance
+app.post("/transfers/:id/confirm", async (req, res) => {
+    const transfer = await Transfer.findById(req.params.id);
 
     if(!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -148,10 +186,9 @@ app.post("/transfers/:id/confirm", (req, res) => {
     }
     try {
         transfer.confirmedQuote = { ...transfer.quote };
-        delete transfer.quote; //old quote is removed after confirmation 
-        //from now on after confirm only the confimedQuote will be used for payment
+        delete transfer.quote; //remove the old quote
         changeState(transfer, STATES.CONFIRMED);
-        // res.json(transfer);
+        await transfer.save();
 
         const complianceResult = complianceCheck(transfer);
 
@@ -163,15 +200,19 @@ app.post("/transfers/:id/confirm", (req, res) => {
 
         if (complianceResult.decision === "APPROVE"){
             changeState(transfer, STATES.COMPLIANCE_APPROVED);
-        }
+            await transfer.save();
+    }
         else if (complianceResult.decision === "REJECT"){
             changeState(transfer, STATES.COMPLIANCE_REJECTED);
+            await transfer.save();
         }
         else if (complianceResult.decision === "MANUAL"){
             changeState(transfer, STATES.COMPLIANCE_PENDING);
+            await transfer.save();
         }
         else {
             changeState(transfer, STATES.FAILED);
+            await transfer.save();
         }
         res.json(transfer);
 
@@ -180,8 +221,9 @@ app.post("/transfers/:id/confirm", (req, res) => {
     }
 });
 
-app.post("/transfers/:id/compliance/approve", (req, res) => {
-    const transfer = transfers.find(t => t.id === req.params.id);
+//to approve a transfer
+app.post("/transfers/:id/compliance/approve", async (req, res) => {
+    const transfer = await Transfer.findById(req.params.id);
 
     if (!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -197,14 +239,16 @@ app.post("/transfers/:id/compliance/approve", (req, res) => {
         transfer.compliance.reviewedAt = new Date();
         transfer.compliance.reviewedBy = "admin";
 
+        await transfer.save();
         res.json(transfer);
     } catch (error) {
         res.status(400).json({message: error.message});
     }
 });
 
-app.post("/transfers/:id/compliance/reject", (req, res) => {
-    const transfer = transfers.find(t => t.id === req.params.id);
+//to reject a transfer
+app.post("/transfers/:id/compliance/reject", async (req, res) => {
+    const transfer = await Transfer.findById(req.params.id);
 
     if (!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -220,14 +264,16 @@ app.post("/transfers/:id/compliance/reject", (req, res) => {
         transfer.compliance.reviewedAt = new Date();
         transfer.compliance.reviewedBy = "admin";
 
+        await transfer.save();
         res.json(transfer);
     } catch (error) {
         res.status(400).json({message: error.message});
     }
 });
 
-app.post("/transfers/:id/payment", (req, res) => {
-    const transfer = transfers.find(t => t.id === req.params.id);
+//to trigger payment and call the webhook
+app.post("/transfers/:id/payment", async (req, res) => {
+    const transfer = await Transfer.findById(req.params.id);
 
     if (!transfer){
         return res.status(404).json({message: "Transfer not found"});
@@ -236,16 +282,17 @@ app.post("/transfers/:id/payment", (req, res) => {
         return res.status(400).json({message: "Transfer not approved for payment"});
     }
     try {
-        changeState(transfer, STATES.PAYMENT_PENDING);
-        setTimeout(() => {
-            const success = Math.random() > 0.3;
-
-            try {
-                changeState(transfer, success ? STATES.PAID : STATES.FAILED);
-            } catch (error) {
-                console.error(error.message);
+        const response = await axios.post(
+            (process.env.PAYOUT_URL || "http://localhost:4000") + "/partner/payouts",
+            {
+                transferId: transfer._id,
+                amount: transfer.confirmedQuote.payoutAmount
             }
-        }, 3000);
+        );
+
+        transfer.partnerPayoutId = response.data.partnerPayoutId;
+        changeState(transfer, STATES.PAYMENT_PENDING);
+        await transfer.save();
 
         res.json({
             message: "Payment processing",
