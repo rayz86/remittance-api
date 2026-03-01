@@ -6,7 +6,7 @@ A simple money-transfer system with two services: an **Orchestrator** (handles t
 
 ## Prerequisites
 
-- **Docker** (recommended) — that's all you need
+- **Docker**
 - Or for local dev: **Node.js** v18+ and **MongoDB** on port `27017`
 
 ---
@@ -33,7 +33,7 @@ remittance-project/
 
 ## Setup
 
-### Option A — Docker (recommended)
+### Option A — Docker
 
 ```bash
 docker-compose up --build
