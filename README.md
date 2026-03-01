@@ -97,59 +97,52 @@ node index.js
 
 ---
 
-## API Walkthrough (curl)
+## API Walkthrough (Postman)
 
-### Step 1 — Create a transfer
+Use Postman to create and exercise transfers. For each request choose the method and URL, set `Content-Type: application/json`, and put JSON in the request body when needed.
 
-```bash
-curl -X POST http://localhost:3000/transfers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sender": { "name": "Alice", "country": "UK" },
-    "recipient": { "name": "Bob", "country": "NG" },
-    "amount": 1000,
-    "currency": "GBP"
-  }'
+Step 1 — Create a transfer
+
+- Method: `POST`
+- URL: `http://localhost:3000/transfers`
+- Body (raw JSON):
+
+```
+{
+  "sender": { "name": "Alice", "country": "UK" },
+  "recipient": { "name": "Bob", "country": "NG" },
+  "amount": 1000,
+  "currency": "GBP"
+}
 ```
 
-Copy the `_id` from the response for the next steps.
+Copy the returned `_id` for the next steps.
 
-### Step 2 — Get a quote
+Step 2 — Get a quote
 
-```bash
-curl -X POST http://localhost:3000/transfers/<id>/quote
-```
+- Method: `POST`
+- URL: `http://localhost:3000/transfers/<id>/quote`
 
-### Step 3 — Confirm (runs compliance automatically)
+Step 3 — Confirm (runs compliance automatically)
 
-```bash
-curl -X POST http://localhost:3000/transfers/<id>/confirm
-```
+- Method: `POST`
+- URL: `http://localhost:3000/transfers/<id>/confirm`
 
-### Step 4 — Trigger payment (calls payout partner)
+Step 4 — Trigger payment (calls payout partner)
 
-```bash
-curl -X POST http://localhost:3000/transfers/<id>/payment
-```
+- Method: `POST`
+- URL: `http://localhost:3000/transfers/<id>/payment`
 
-### Step 5 — Check final status
+Step 5 — Check final status
 
-Wait ~3 seconds for the payout webhook, then:
+- Method: `GET`
+- URL: `http://localhost:3000/transfers/<id>`
 
-```bash
-curl http://localhost:3000/transfers/<id>
-```
+Wait ~3 seconds for the payout webhook; the transfer `state` will be `PAID` or `FAILED`.
 
-State should be `PAID` or `FAILED`.
+Manual compliance (for amounts > 5000)
 
-### Manual compliance (for amounts > 5000)
-
-```bash
-# Approve
-curl -X POST http://localhost:3000/transfers/<id>/compliance/approve
-
-# Reject
-curl -X POST http://localhost:3000/transfers/<id>/compliance/reject
-```
+- Approve: `POST http://localhost:3000/transfers/<id>/compliance/approve`
+- Reject: `POST http://localhost:3000/transfers/<id>/compliance/reject`
 
 ---
